@@ -2,7 +2,7 @@
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>差旅費用智慧計算器 (App版)</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -19,14 +19,25 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     
     <style>
-        body { background-color: #f3f4f6; }
+        body { background-color: #f3f4f6; -webkit-tap-highlight-color: transparent; }
+        .ios-safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+        
+        /* 彈出視窗動畫 */
+        @keyframes slideUp {
+            from { transform: translateY(100%); }
+            to { transform: translateY(0); }
+        }
+        .animate-slide-up {
+            animation: slideUp 0.3s ease-out forwards;
+        }
+
         @media print {
             .no-print { display: none !important; }
             .print-break { page-break-inside: avoid; }
             body { background-color: white; }
             input, select { border: none !important; background: transparent !important; appearance: none; padding: 0; }
-            /* 隱藏 placeholder */
             input::placeholder { color: transparent; }
+            #root { padding-bottom: 0 !important; }
         }
     </style>
 </head>
@@ -34,33 +45,30 @@
     <div id="root"></div>
 
     <script type="text/babel" data-type="module">
-        import React, { useState, useEffect } from 'react';
+        import React, { useState, useEffect, useRef } from 'react';
         import { createRoot } from 'react-dom/client';
         import { 
-            Plane, Car, Home, Utensils, Coffee, Gift, 
-            Smartphone, Calendar, User, MapPin, 
-            Calculator, AlertCircle, CheckCircle2,
-            Printer, Save, ChevronRight
+            Plane, Car, Home, Utensils, Gift, 
+            User, Calculator, AlertCircle, 
+            Printer, Save, ChevronUp, X, ChevronDown
         } from 'lucide-react';
 
-        // --- 1. 核心資料設定 ---
+        // --- 核心資料設定 ---
         const RANKS = [
             { id: 'staff', name: '一般員工 (1-15職等)', limit: '一般' },
             { id: 'manager', name: '主管 (經副理/16-19職等)', limit: '較高' },
             { id: 'exec', name: '高階主管 (董事長/總經理/副總)', limit: '實支' },
         ];
 
-        // 國內津貼
         const DOMESTIC_RATES = {
             staff: { breakfast: 80, meal: 200, lodgingLimit: 2000 },
             manager: { breakfast: 100, meal: 250, lodgingLimit: 2400 },
-            exec: { breakfast: 120, meal: 300, lodgingLimit: 999999 }, // 999999 代表實支實付
+            exec: { breakfast: 120, meal: 300, lodgingLimit: 999999 },
         };
 
-        // 國外日支費 (膳雜費)
         const FOREIGN_RATES = {
-            zoneA: { staff: 1600, manager: 1600, exec: 2000 }, // 日本/歐美
-            zoneB: { staff: 1300, manager: 1300, exec: 1700 }, // 東南亞/大陸
+            zoneA: { staff: 1600, manager: 1600, exec: 2000 },
+            zoneB: { staff: 1300, manager: 1300, exec: 1700 },
         };
 
         const FOREIGN_ZONES = [
@@ -68,12 +76,42 @@
             { id: 'zoneB', name: 'B區 (東南亞/韓國/大陸/其他)', desc: '一般地區' },
         ];
 
+        // --- UI 元件 (移至外部以解決焦點遺失問題) ---
+        const SectionTitle = ({ icon: Icon, title, color }) => (
+            <div className={`flex items-center space-x-2 text-${color}-600 mb-4 border-b border-${color}-100 pb-2`}>
+                <Icon className="w-5 h-5" />
+                <h3 className="font-bold text-lg">{title}</h3>
+            </div>
+        );
+
+        const InputGroup = ({ label, suffix, children }) => (
+            <div className="mb-3">
+                <label className="block text-sm font-medium text-slate-600 mb-1">{label}</label>
+                <div className="relative">
+                    {children}
+                    {suffix && <span className="absolute right-3 top-2.5 text-slate-400 text-sm">{suffix}</span>}
+                </div>
+            </div>
+        );
+
+        const NumberInput = ({ name, placeholder, value, onChange }) => (
+            <input 
+                type="number" 
+                name={name}
+                value={value}
+                onChange={onChange}
+                placeholder={placeholder}
+                className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none transition-all text-right font-mono text-lg"
+                onFocus={(e) => e.target.select()}
+            />
+        );
+
         function TravelApp() {
-            const [mode, setMode] = useState('domestic'); // domestic | foreign
+            const [mode, setMode] = useState('domestic');
+            const [showDetail, setShowDetail] = useState(false);
 
             // --- 表單資料 ---
             const [formData, setFormData] = useState({
-                // A. 基本資料
                 name: '',
                 rank: 'staff',
                 zone: 'zoneA',
@@ -81,28 +119,17 @@
                 endDate: '',
                 days: 1,
                 nights: 0,
-
-                // B. 交通
-                transportType: 'public', // public, car, moto
                 publicCost: '',
                 carKm: '',
                 motoKm: '',
                 fuelPrice: 31.0,
-
-                // C. 住宿
                 lodgingCost: '',
-
-                // D. 膳食與交際 (重點邏輯)
-                // 國內用「餐數」，國外用「天數」
-                breakfastCount: '',     // 國內
-                lunchDinnerCount: '',   // 國內
-                
-                hasEntertainment: false, // 是否有交際應酬
-                entertainmentDays: '',   // 國外：有交際的天數 (扣1/3)
-                
-                // E. 其他實支實付
+                breakfastCount: '',
+                lunchDinnerCount: '',
+                hasEntertainment: false,
+                entertainmentDays: '',
                 telecomCost: '',
-                entertainmentCost: '', // 餐費(交際)
+                entertainmentCost: '',
                 drinksCost: '',
                 giftCost: '',
                 miscCost: '',
@@ -113,14 +140,14 @@
                 lodgingTotal: 0,
                 lodgingLimit: 0,
                 lodgingOver: 0,
-                mealAllowance: 0,    // 原始津貼
-                mealDeduction: 0,    // 扣除額 (1/3)
-                finalMealTotal: 0,   // 實領膳費
+                mealAllowance: 0,
+                mealDeduction: 0,
+                finalMealTotal: 0,
                 othersTotal: 0,
                 grandTotal: 0,
             });
 
-            // --- 自動計算天數 ---
+            // 自動計算天數
             useEffect(() => {
                 if (formData.startDate && formData.endDate) {
                     const start = new Date(formData.startDate);
@@ -137,31 +164,21 @@
                 }
             }, [formData.startDate, formData.endDate]);
 
-            // --- 核心計算邏輯 ---
+            // 核心計算邏輯
             useEffect(() => {
-                let tTotal = 0; // Transport
-                let lTotal = 0; // Lodging
-                let lLimit = 0; // Lodging Limit
-                let lOver = 0;  // Lodging Over
-                let mBase = 0;  // Meal Base
-                let mDed = 0;   // Meal Deduction
-                let oTotal = 0; // Others
+                let tTotal = 0, lTotal = 0, lLimit = 0, lOver = 0, mBase = 0, mDed = 0, oTotal = 0;
 
-                // 1. 交通計算
+                // 1. 交通
                 const pub = Number(formData.publicCost) || 0;
-                // 汽車: (KM/8 * 油價) + (KM * 2)
                 const car = formData.carKm > 0 ? ((formData.carKm / 8) * formData.fuelPrice) + (formData.carKm * 2) : 0;
-                // 機車: (KM/20 * 油價) + (KM * 1)
                 const moto = formData.motoKm > 0 ? ((formData.motoKm / 20) * formData.fuelPrice) + (formData.motoKm * 1) : 0;
-                
                 tTotal = Math.round(pub + car + moto);
 
-                // 2. 住宿計算
+                // 2. 住宿
                 const actualLodging = Number(formData.lodgingCost) || 0;
                 if (mode === 'domestic') {
                     const rate = DOMESTIC_RATES[formData.rank].lodgingLimit;
                     lLimit = rate * formData.nights;
-                    // 高階主管實支實付，其他有上限
                     if (formData.rank !== 'exec' && actualLodging > lLimit) {
                         lTotal = actualLodging; 
                         lOver = actualLodging - lLimit;
@@ -169,31 +186,23 @@
                         lTotal = actualLodging;
                     }
                 } else {
-                    // 國外實報實銷
                     lTotal = actualLodging;
                     lLimit = 0;
                 }
 
-                // 3. 膳雜費與扣除邏輯 (重點!)
+                // 3. 膳雜
                 if (mode === 'domestic') {
-                    // 國內依餐數
                     const bRate = DOMESTIC_RATES[formData.rank].breakfast;
                     const ldRate = DOMESTIC_RATES[formData.rank].meal;
                     mBase = (Number(formData.breakfastCount) * bRate) + (Number(formData.lunchDinnerCount) * ldRate);
-                    // 國內通常直接少報餐數，不走自動扣除邏輯，故 deduction = 0
                 } else {
-                    // 國外依日支費
                     const dailyRate = FOREIGN_RATES[formData.zone][formData.rank];
                     mBase = formData.days * dailyRate;
-                    
-                    // 若有交際應酬，當日扣 1/3
                     const entDays = Number(formData.entertainmentDays) || 0;
-                    if (entDays > 0) {
-                        mDed = Math.round(entDays * dailyRate * (1/3));
-                    }
+                    if (entDays > 0) mDed = Math.round(entDays * dailyRate * (1/3));
                 }
 
-                // 4. 其他雜支
+                // 4. 其他
                 oTotal = (Number(formData.telecomCost) || 0) +
                          (Number(formData.entertainmentCost) || 0) +
                          (Number(formData.drinksCost) || 0) +
@@ -222,57 +231,26 @@
                 }));
             };
 
-            // --- UI 元件 ---
-            const SectionTitle = ({ icon: Icon, title, color }) => (
-                <div className={`flex items-center space-x-2 text-${color}-600 mb-4 border-b border-${color}-100 pb-2`}>
-                    <Icon className="w-5 h-5" />
-                    <h3 className="font-bold text-lg">{title}</h3>
-                </div>
-            );
-
-            const InputGroup = ({ label, suffix, children }) => (
-                <div className="mb-3">
-                    <label className="block text-sm font-medium text-slate-600 mb-1">{label}</label>
-                    <div className="relative">
-                        {children}
-                        {suffix && <span className="absolute right-3 top-2.5 text-slate-400 text-sm">{suffix}</span>}
-                    </div>
-                </div>
-            );
-
-            const NumberInput = ({ name, placeholder, value, onChange }) => (
-                <input 
-                    type="number" 
-                    name={name}
-                    value={value}
-                    onChange={onChange}
-                    placeholder={placeholder}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none transition-all"
-                />
-            );
-
             return (
-                <div className="min-h-screen pb-20 md:pb-0">
+                <div className="min-h-screen pb-32 md:pb-40 bg-gray-50">
                     
                     {/* Header */}
-                    <header className="bg-slate-900 text-white p-4 shadow-lg no-print">
-                        <div className="max-w-4xl mx-auto flex justify-between items-center">
+                    <header className="bg-slate-900 text-white p-4 shadow-lg sticky top-0 z-10 no-print">
+                        <div className="max-w-2xl mx-auto flex justify-between items-center">
                             <div className="flex items-center space-x-2">
-                                <div className="bg-blue-500 p-1.5 rounded-lg">
-                                    <Calculator className="w-5 h-5 text-white" />
-                                </div>
-                                <h1 className="font-bold text-lg tracking-wide">差旅費用智慧計算器</h1>
+                                <Calculator className="w-5 h-5 text-blue-400" />
+                                <h1 className="font-bold text-lg">差旅費用計算</h1>
                             </div>
-                            <div className="flex space-x-2 text-sm">
+                            <div className="bg-slate-800 rounded-full p-1 flex text-xs font-bold">
                                 <button 
                                     onClick={() => setMode('domestic')}
-                                    className={`px-3 py-1.5 rounded-full transition-all ${mode === 'domestic' ? 'bg-blue-500 text-white font-bold' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}
+                                    className={`px-3 py-1 rounded-full transition-all ${mode === 'domestic' ? 'bg-blue-500 text-white' : 'text-slate-400'}`}
                                 >
                                     國內
                                 </button>
                                 <button 
                                     onClick={() => setMode('foreign')}
-                                    className={`px-3 py-1.5 rounded-full transition-all ${mode === 'foreign' ? 'bg-indigo-500 text-white font-bold' : 'bg-slate-800 text-slate-400 hover:bg-slate-700'}`}
+                                    className={`px-3 py-1 rounded-full transition-all ${mode === 'foreign' ? 'bg-indigo-500 text-white' : 'text-slate-400'}`}
                                 >
                                     國外
                                 </button>
@@ -281,238 +259,243 @@
                     </header>
 
                     {/* Main Content */}
-                    <main className="max-w-4xl mx-auto p-4 md:p-6 space-y-6">
+                    <main className="max-w-2xl mx-auto p-4 space-y-4">
                         
-                        {/* 1. 基本資料 (人、地、時) */}
-                        <section className="bg-white rounded-2xl shadow-sm p-5 border border-slate-100 print:shadow-none print:border-none">
+                        {/* 1. 基本資料 */}
+                        <section className="bg-white rounded-xl shadow-sm p-4 border border-slate-100">
                             <SectionTitle icon={User} title="基本資料" color="blue" />
-                            
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                <InputGroup label="姓名">
-                                    <input type="text" name="name" value={formData.name} onChange={handleInput} className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2" placeholder="請輸入姓名" />
-                                </InputGroup>
-                                
-                                <InputGroup label="職級 (影響津貼上限)">
-                                    <select name="rank" value={formData.rank} onChange={handleInput} className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
-                                        {RANKS.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
-                                    </select>
-                                </InputGroup>
-
-                                {mode === 'foreign' && (
-                                    <InputGroup label="出差地區" suffix={FOREIGN_ZONES.find(z => z.id === formData.zone)?.desc}>
-                                        <select name="zone" value={formData.zone} onChange={handleInput} className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
-                                            {FOREIGN_ZONES.map(z => <option key={z.id} value={z.id}>{z.name}</option>)}
+                            <div className="grid grid-cols-2 gap-3">
+                                <div className="col-span-2 md:col-span-1">
+                                    <InputGroup label="姓名">
+                                        <input 
+                                            type="text" 
+                                            name="name" 
+                                            value={formData.name} 
+                                            onChange={handleInput} 
+                                            className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none" 
+                                            placeholder="姓名" 
+                                        />
+                                    </InputGroup>
+                                </div>
+                                <div className="col-span-2 md:col-span-1">
+                                    <InputGroup label="職級">
+                                        <select 
+                                            name="rank" 
+                                            value={formData.rank} 
+                                            onChange={handleInput} 
+                                            className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none"
+                                        >
+                                            {RANKS.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
                                         </select>
                                     </InputGroup>
-                                )}
-
-                                <div className="md:col-span-2 grid grid-cols-2 gap-4">
-                                    <InputGroup label="出發日期">
-                                        <input type="date" name="startDate" value={formData.startDate} onChange={handleInput} className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2" />
-                                    </InputGroup>
-                                    <InputGroup label="結束日期">
-                                        <input type="date" name="endDate" value={formData.endDate} onChange={handleInput} className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2" />
-                                    </InputGroup>
                                 </div>
-
-                                <div className="md:col-span-2 bg-blue-50 p-3 rounded-lg flex justify-between items-center text-blue-800 text-sm">
-                                    <span>系統自動計算天數：</span>
-                                    <span className="font-bold text-lg">{formData.days} 天 / {formData.nights} 晚</span>
-                                </div>
-                            </div>
-                        </section>
-
-                        {/* 2. 交通類別 */}
-                        <section className="bg-white rounded-2xl shadow-sm p-5 border border-slate-100 print:shadow-none print:border-none">
-                            <SectionTitle icon={Plane} title="交通費用" color="emerald" />
-                            
-                            <div className="space-y-4">
-                                <InputGroup label="大眾運輸 / 機票 / 計程車 (實報實銷)" suffix="元">
-                                    <NumberInput name="publicCost" value={formData.publicCost} onChange={handleInput} placeholder="總金額" />
-                                </InputGroup>
-
-                                {mode === 'domestic' && (
-                                    <div className="bg-emerald-50 p-4 rounded-xl border border-emerald-100">
-                                        <h4 className="font-bold text-emerald-800 text-sm mb-3 flex items-center">
-                                            <Car className="w-4 h-4 mr-2" /> 私車公用里程補貼
-                                        </h4>
-                                        <div className="grid grid-cols-2 gap-4">
-                                            <InputGroup label="汽車里程" suffix="km">
-                                                <NumberInput name="carKm" value={formData.carKm} onChange={handleInput} placeholder="0" />
-                                            </InputGroup>
-                                            <InputGroup label="機車里程" suffix="km">
-                                                <NumberInput name="motoKm" value={formData.motoKm} onChange={handleInput} placeholder="0" />
-                                            </InputGroup>
-                                        </div>
-                                        <div className="flex justify-between items-center mt-2 text-xs text-emerald-600">
-                                            <span>當前油價計算: ${formData.fuelPrice}/L</span>
-                                            <span className="font-bold text-base">+ NT$ {(result.transportTotal - (Number(formData.publicCost)||0)).toLocaleString()}</span>
-                                        </div>
+                                {mode === 'foreign' && (
+                                    <div className="col-span-2">
+                                        <InputGroup label="地區">
+                                            <select 
+                                                name="zone" 
+                                                value={formData.zone} 
+                                                onChange={handleInput} 
+                                                className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none"
+                                            >
+                                                {FOREIGN_ZONES.map(z => <option key={z.id} value={z.id}>{z.name}</option>)}
+                                            </select>
+                                        </InputGroup>
                                     </div>
                                 )}
+                                <div className="col-span-2 grid grid-cols-2 gap-3">
+                                    <InputGroup label="出發">
+                                        <input 
+                                            type="date" 
+                                            name="startDate" 
+                                            value={formData.startDate} 
+                                            onChange={handleInput} 
+                                            className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none" 
+                                        />
+                                    </InputGroup>
+                                    <InputGroup label="結束">
+                                        <input 
+                                            type="date" 
+                                            name="endDate" 
+                                            value={formData.endDate} 
+                                            onChange={handleInput} 
+                                            className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none" 
+                                        />
+                                    </InputGroup>
+                                </div>
+                                <div className="col-span-2 text-center text-sm text-blue-600 bg-blue-50 py-1 rounded">
+                                    共 <b>{formData.days}</b> 天 / <b>{formData.nights}</b> 晚
+                                </div>
                             </div>
                         </section>
 
-                        {/* 3. 住宿與膳費 (含特殊邏輯) */}
-                        <section className="bg-white rounded-2xl shadow-sm p-5 border border-slate-100 print:shadow-none print:border-none">
-                            <SectionTitle icon={Home} title="住宿與膳費" color="orange" />
+                        {/* 2. 交通 */}
+                        <section className="bg-white rounded-xl shadow-sm p-4 border border-slate-100">
+                            <SectionTitle icon={Plane} title="交通費用" color="emerald" />
+                            <InputGroup label="大眾運輸/機票" suffix="元">
+                                <NumberInput name="publicCost" value={formData.publicCost} onChange={handleInput} placeholder="0" />
+                            </InputGroup>
+                            {mode === 'domestic' && (
+                                <div className="bg-emerald-50 p-3 rounded-lg border border-emerald-100 mt-2">
+                                    <div className="flex justify-between items-center mb-2">
+                                        <span className="text-sm font-bold text-emerald-800 flex items-center"><Car className="w-3 h-3 mr-1"/>私車公用 (含油資保養)</span>
+                                        <span className="text-xs text-emerald-600">油價 ${formData.fuelPrice}</span>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <InputGroup label="汽車(km)"><NumberInput name="carKm" value={formData.carKm} onChange={handleInput} placeholder="0" /></InputGroup>
+                                        <InputGroup label="機車(km)"><NumberInput name="motoKm" value={formData.motoKm} onChange={handleInput} placeholder="0" /></InputGroup>
+                                    </div>
+                                </div>
+                            )}
+                        </section>
+
+                        {/* 3. 膳宿 */}
+                        <section className="bg-white rounded-xl shadow-sm p-4 border border-slate-100">
+                            <SectionTitle icon={Home} title="住宿與膳食" color="orange" />
+                            <InputGroup label="住宿費 (實支總額)" suffix="元">
+                                <NumberInput name="lodgingCost" value={formData.lodgingCost} onChange={handleInput} placeholder="0" />
+                            </InputGroup>
+                            {result.lodgingOver > 0 && <div className="text-xs text-red-500 mb-3 flex items-center"><AlertCircle className="w-3 h-3 mr-1"/>超支 {result.lodgingOver} 元</div>}
                             
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                {/* 住宿 */}
-                                <div>
-                                    <InputGroup label="住宿費 (實支總額)" suffix="元">
-                                        <NumberInput name="lodgingCost" value={formData.lodgingCost} onChange={handleInput} placeholder="請輸入單據金額" />
-                                    </InputGroup>
-                                    {mode === 'domestic' && result.lodgingOver > 0 && (
-                                        <div className="flex items-center text-red-500 text-xs mt-1 bg-red-50 p-2 rounded">
-                                            <AlertCircle className="w-3 h-3 mr-1" />
-                                            超支 {result.lodgingOver} 元 (上限: {result.lodgingLimit})
-                                        </div>
-                                    )}
-                                </div>
+                            <div className="h-px bg-slate-100 my-4"></div>
 
-                                {/* 膳費 */}
-                                <div>
-                                    {mode === 'domestic' ? (
-                                        <div className="grid grid-cols-2 gap-3">
-                                            <InputGroup label="早餐餐數" suffix="餐">
-                                                <NumberInput name="breakfastCount" value={formData.breakfastCount} onChange={handleInput} placeholder="0" />
-                                            </InputGroup>
-                                            <InputGroup label="午/晚餐餐數" suffix="餐">
-                                                <NumberInput name="lunchDinnerCount" value={formData.lunchDinnerCount} onChange={handleInput} placeholder="0" />
-                                            </InputGroup>
-                                        </div>
-                                    ) : (
-                                        <div className="bg-orange-50 p-3 rounded-lg text-center">
-                                            <p className="text-xs text-orange-600 mb-1">國外日支費 (依職級/地區)</p>
-                                            <p className="text-xl font-bold text-orange-700">${FOREIGN_RATES[formData.zone][formData.rank]} / 天</p>
-                                            <p className="text-xs text-orange-400 mt-1">x {formData.days} 天 = ${result.mealAllowance}</p>
-                                        </div>
-                                    )}
+                            {mode === 'domestic' ? (
+                                <div className="grid grid-cols-2 gap-3">
+                                    <InputGroup label="早餐餐數" suffix="餐"><NumberInput name="breakfastCount" value={formData.breakfastCount} onChange={handleInput} placeholder="0" /></InputGroup>
+                                    <InputGroup label="午/晚餐數" suffix="餐"><NumberInput name="lunchDinnerCount" value={formData.lunchDinnerCount} onChange={handleInput} placeholder="0" /></InputGroup>
                                 </div>
-
-                                {/* 重點功能: 交際費扣抵 (僅國外適用自動扣除邏輯) */}
-                                {mode === 'foreign' && (
-                                    <div className="md:col-span-2 bg-red-50 border border-red-100 p-4 rounded-xl">
-                                        <div className="flex justify-between items-start mb-2">
-                                            <label className="flex items-center space-x-2 cursor-pointer">
-                                                <input 
-                                                    type="checkbox" 
-                                                    className="w-4 h-4 text-red-600 rounded" 
-                                                    checked={formData.hasEntertainment}
-                                                    onChange={(e) => setFormData(prev => ({...prev, hasEntertainment: e.target.checked}))}
-                                                />
-                                                <span className="font-bold text-red-800">有發生交際應酬 (需扣抵膳費)?</span>
-                                            </label>
-                                        </div>
-                                        
+                            ) : (
+                                <div>
+                                    <div className="flex justify-between text-sm mb-2">
+                                        <span className="text-slate-600">國外日支費 (${FOREIGN_RATES[formData.zone][formData.rank]}/天)</span>
+                                        <span className="font-bold text-orange-600">${result.mealAllowance}</span>
+                                    </div>
+                                    <div className="bg-red-50 p-3 rounded-lg border border-red-100">
+                                        <label className="flex items-center space-x-2 mb-2">
+                                            <input type="checkbox" checked={formData.hasEntertainment} onChange={(e) => setFormData(prev => ({...prev, hasEntertainment: e.target.checked}))} className="rounded text-red-500" />
+                                            <span className="text-sm font-bold text-red-800">有交際應酬 (需扣抵)?</span>
+                                        </label>
                                         {formData.hasEntertainment && (
-                                            <div className="animate-in fade-in slide-in-from-top-2 duration-300">
-                                                <div className="flex items-center space-x-4">
-                                                    <div className="flex-1">
-                                                        <p className="text-xs text-red-600 mb-1">請輸入有交際的天數</p>
-                                                        <input 
-                                                            type="number" 
-                                                            name="entertainmentDays"
-                                                            value={formData.entertainmentDays} 
-                                                            onChange={handleInput}
-                                                            className="w-full bg-white border border-red-200 rounded px-3 py-1.5 focus:ring-2 focus:ring-red-200 outline-none"
-                                                            placeholder="0"
-                                                        />
-                                                    </div>
-                                                    <div className="flex-1 text-right">
-                                                        <p className="text-xs text-red-500">自動扣除額 (1/3)</p>
-                                                        <p className="text-lg font-bold text-red-600">- NT$ {result.mealDeduction}</p>
-                                                    </div>
-                                                </div>
-                                                <p className="text-[10px] text-red-400 mt-2">* 依公司規定：當日申報交際費者，需扣除該日日支費之 1/3。</p>
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-xs text-red-600 whitespace-nowrap">交際天數:</span>
+                                                <input 
+                                                    type="number" 
+                                                    name="entertainmentDays" 
+                                                    value={formData.entertainmentDays} 
+                                                    onChange={handleInput} 
+                                                    className="w-16 bg-white border border-red-200 rounded px-2 py-1 text-center outline-none focus:ring-2 focus:ring-red-200" 
+                                                    placeholder="0" 
+                                                />
+                                                <span className="text-xs font-bold text-red-600 ml-auto">扣除 -${result.mealDeduction}</span>
                                             </div>
                                         )}
                                     </div>
-                                )}
-                            </div>
+                                </div>
+                            )}
                         </section>
 
-                        {/* 4. 其他實支實付 */}
-                        <section className="bg-white rounded-2xl shadow-sm p-5 border border-slate-100 print:shadow-none print:border-none">
-                            <SectionTitle icon={Gift} title="其他費用 (實支實付)" color="purple" />
-                            
-                            <div className="grid grid-cols-2 gap-4">
-                                <InputGroup label="電信費" suffix="元">
-                                    <NumberInput name="telecomCost" value={formData.telecomCost} onChange={handleInput} placeholder="0" />
-                                </InputGroup>
-                                <InputGroup label="餐費 (交際應酬)" suffix="元">
-                                    <NumberInput name="entertainmentCost" value={formData.entertainmentCost} onChange={handleInput} placeholder="0" />
-                                </InputGroup>
-                                <InputGroup label="飲品 (會議用)" suffix="元">
-                                    <NumberInput name="drinksCost" value={formData.drinksCost} onChange={handleInput} placeholder="0" />
-                                </InputGroup>
-                                <InputGroup label="禮品 (餽贈)" suffix="元">
-                                    <NumberInput name="giftCost" value={formData.giftCost} onChange={handleInput} placeholder="0" />
-                                </InputGroup>
-                                <div className="col-span-2">
-                                    <InputGroup label="其他雜支 (過路費/簽證等)" suffix="元">
-                                        <NumberInput name="miscCost" value={formData.miscCost} onChange={handleInput} placeholder="0" />
-                                    </InputGroup>
-                                </div>
+                        {/* 4. 其他 */}
+                        <section className="bg-white rounded-xl shadow-sm p-4 border border-slate-100">
+                            <SectionTitle icon={Gift} title="其他雜支" color="purple" />
+                            <div className="grid grid-cols-2 gap-3">
+                                <InputGroup label="電信費"><NumberInput name="telecomCost" value={formData.telecomCost} onChange={handleInput} placeholder="0" /></InputGroup>
+                                <InputGroup label="交際餐費"><NumberInput name="entertainmentCost" value={formData.entertainmentCost} onChange={handleInput} placeholder="0" /></InputGroup>
+                                <InputGroup label="飲品/禮品"><NumberInput name="giftCost" value={formData.giftCost} onChange={handleInput} placeholder="0" /></InputGroup>
+                                <InputGroup label="其他(過路費)"><NumberInput name="miscCost" value={formData.miscCost} onChange={handleInput} placeholder="0" /></InputGroup>
                             </div>
                         </section>
-                        
-                        {/* 5. 總計報表區 */}
-                        <section className="bg-slate-800 text-slate-300 rounded-2xl shadow-lg p-6 print:bg-white print:text-black print:border print:border-black">
-                            <h3 className="text-white font-bold text-xl mb-4 border-b border-slate-600 pb-2 print:text-black print:border-black">費用試算總表</h3>
-                            
-                            <div className="space-y-3 font-mono">
-                                <div className="flex justify-between">
-                                    <span>+ 交通總額</span>
-                                    <span>{result.transportTotal.toLocaleString()}</span>
-                                </div>
-                                <div className="flex justify-between">
-                                    <span>+ 住宿總額</span>
-                                    <span>{result.lodgingTotal.toLocaleString()}</span>
-                                </div>
-                                <div className="flex justify-between">
-                                    <span>+ 膳雜費 (已扣除交際日)</span>
-                                    <span className={result.mealDeduction > 0 ? "text-yellow-400 print:text-black" : ""}>
-                                        {result.finalMealTotal.toLocaleString()}
-                                    </span>
-                                </div>
-                                <div className="flex justify-between">
-                                    <span>+ 其他雜支總額</span>
-                                    <span>{result.othersTotal.toLocaleString()}</span>
-                                </div>
-                                
-                                <div className="h-px bg-slate-600 my-2 print:bg-black"></div>
-                                
-                                <div className="flex justify-between items-center text-white print:text-black">
-                                    <span className="text-lg font-bold">預估請款總金額</span>
-                                    <span className="text-3xl font-bold text-emerald-400 print:text-black">
-                                        NT$ {result.grandTotal.toLocaleString()}
-                                    </span>
-                                </div>
-                            </div>
-                        </section>
-
-                        {/* 按鈕區 (列印時隱藏) */}
-                        <div className="flex justify-end space-x-4 no-print pt-4">
-                            <button 
-                                onClick={() => window.print()} 
-                                className="flex items-center space-x-2 bg-slate-200 text-slate-700 px-6 py-3 rounded-xl hover:bg-slate-300 transition-colors font-medium"
-                            >
-                                <Printer className="w-5 h-5" />
-                                <span>列印報表</span>
-                            </button>
-                            <button 
-                                onClick={() => alert("請使用瀏覽器的「分享」或「加入主畫面」功能來儲存此 App")} 
-                                className="flex items-center space-x-2 bg-blue-600 text-white px-6 py-3 rounded-xl hover:bg-blue-700 transition-colors shadow-lg shadow-blue-200 font-medium"
-                            >
-                                <Save className="w-5 h-5" />
-                                <span>儲存紀錄</span>
-                            </button>
-                        </div>
-                        
-                        <div className="h-10"></div>
                     </main>
+
+                    {/* --- 懸浮總計列 (Sticky Footer) --- */}
+                    <div 
+                        className="fixed bottom-0 left-0 right-0 bg-slate-900 text-white shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)] z-50 transition-all duration-300 ios-safe-bottom no-print cursor-pointer"
+                        onClick={() => setShowDetail(!showDetail)}
+                    >
+                        <div className="max-w-2xl mx-auto">
+                            {/* 總金額顯示區 */}
+                            <div className="p-4 flex justify-between items-center">
+                                <div>
+                                    <div className="text-xs text-slate-400 mb-0.5 flex items-center">
+                                        預估請款總額
+                                        {showDetail ? <ChevronDown className="w-3 h-3 ml-1" /> : <ChevronUp className="w-3 h-3 ml-1 animate-bounce" />}
+                                    </div>
+                                    <div className="text-3xl font-bold font-mono text-emerald-400 leading-none">
+                                        ${result.grandTotal.toLocaleString()}
+                                    </div>
+                                </div>
+                                <button className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-lg transition-colors">
+                                    {showDetail ? '關閉明細' : '查看明細'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* --- 彈出式明細 (Slide-up Panel) --- */}
+                    {showDetail && (
+                        <div className="fixed inset-0 z-40 flex items-end justify-center no-print">
+                            {/* 背景遮罩 */}
+                            <div 
+                                className="absolute inset-0 bg-black/50 backdrop-blur-sm transition-opacity" 
+                                onClick={() => setShowDetail(false)}
+                            ></div>
+                            
+                            {/* 滑動面板 */}
+                            <div className="relative w-full max-w-2xl bg-white rounded-t-2xl shadow-2xl animate-slide-up overflow-hidden mb-[80px]"> 
+                                {/* Header */}
+                                <div className="bg-slate-100 p-3 border-b border-slate-200 flex justify-between items-center">
+                                    <h3 className="font-bold text-slate-700 flex items-center">
+                                        <Calculator className="w-4 h-4 mr-2" /> 費用試算明細
+                                    </h3>
+                                    <button onClick={() => setShowDetail(false)} className="p-1 bg-slate-200 rounded-full hover:bg-slate-300">
+                                        <X className="w-4 h-4" />
+                                    </button>
+                                </div>
+                                
+                                {/* Content */}
+                                <div className="p-4 space-y-3 text-sm">
+                                    <div className="flex justify-between py-1 border-b border-slate-100">
+                                        <span className="text-slate-500">交通總額</span>
+                                        <span className="font-mono font-bold">{result.transportTotal.toLocaleString()}</span>
+                                    </div>
+                                    <div className="flex justify-between py-1 border-b border-slate-100">
+                                        <span className="text-slate-500">住宿總額</span>
+                                        <span className="font-mono font-bold">{result.lodgingTotal.toLocaleString()}</span>
+                                    </div>
+                                    <div className="flex justify-between py-1 border-b border-slate-100">
+                                        <span className="text-slate-500">膳雜費 (實領)</span>
+                                        <span className="font-mono font-bold">{result.finalMealTotal.toLocaleString()}</span>
+                                    </div>
+                                    <div className="flex justify-between py-1 border-b border-slate-100">
+                                        <span className="text-slate-500">其他雜支</span>
+                                        <span className="font-mono font-bold">{result.othersTotal.toLocaleString()}</span>
+                                    </div>
+                                    
+                                    <div className="pt-2 flex justify-between items-center">
+                                        <span className="font-bold text-lg">總計</span>
+                                        <span className="font-bold text-2xl text-emerald-600 font-mono">
+                                            NT$ {result.grandTotal.toLocaleString()}
+                                        </span>
+                                    </div>
+
+                                    <div className="grid grid-cols-2 gap-3 mt-4">
+                                        <button 
+                                            onClick={() => { window.print(); setShowDetail(false); }}
+                                            className="flex items-center justify-center bg-slate-200 py-3 rounded-lg font-bold text-slate-700 hover:bg-slate-300"
+                                        >
+                                            <Printer className="w-4 h-4 mr-2" /> 列印
+                                        </button>
+                                        <button 
+                                            onClick={() => { alert('請使用瀏覽器選單加入主畫面'); setShowDetail(false); }}
+                                            className="flex items-center justify-center bg-blue-600 py-3 rounded-lg font-bold text-white hover:bg-blue-700"
+                                        >
+                                            <Save className="w-4 h-4 mr-2" /> 儲存
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                 </div>
             );
         }
