@@ -1,0 +1,564 @@
+import React, { useState, useEffect } from 'react';
+import { Save, Printer, User, Table, Calendar, Clock, DollarSign, ChevronDown } from 'lucide-react';
+
+// --- 常數資料 ---
+
+const RANKS = [
+  { id: 'staff', name: '一般員工 (1-15職等)', type: 'general' },
+  { id: 'manager', name: '主管 (經副理/16-19職等)', type: 'manager' },
+  { id: 'exec', name: '高階主管 (董事長/總經理/副總)', type: 'exec' },
+];
+
+const DOMESTIC_RATES = {
+  staff: { breakfast: 80, meal: 200, lodgingLimit: 2000 },
+  manager: { breakfast: 100, meal: 250, lodgingLimit: 2400 },
+  exec: { breakfast: 120, meal: 300, lodgingLimit: 999999 },
+};
+
+const FOREIGN_RATES = {
+  zoneA: { staff: 1600, manager: 1600, exec: 2000 },
+  zoneB: { staff: 1300, manager: 1300, exec: 1700 },
+};
+
+const FOREIGN_ZONES = [
+  { id: 'zoneA', name: 'A區 (日本/歐美/澳洲/香港)', desc: '高消費' },
+  { id: 'zoneB', name: 'B區 (東南亞/韓國/大陸)', desc: '一般' },
+];
+
+export default function TravelExpenseExcel() {
+  const [activeTab, setActiveTab] = useState('domestic');
+  
+  // --- 表單狀態 ---
+  const [formData, setFormData] = useState({
+    // 1. 基本資料 (人、地、時)
+    name: '',
+    rank: 'staff',
+    zone: 'zoneA',
+    startDate: '',
+    endDate: '',
+    days: 1, // 自動計算或手動調整
+    nights: 0,
+    
+    // 2. 交通
+    publicTransport: 0, // 機票/高鐵/火車/計程車
+    carKm: 0,
+    motoKm: 0,
+    fuelPrice: 31.0,
+
+    // 3. 住宿
+    lodgingCost: 0,
+
+    // 4. 膳費 (津貼)
+    breakfastCount: 0,     // 國內
+    lunchDinnerCount: 0,   // 國內
+    businessMealDays: 0,   // 國外：有交際應酬的天數 (需扣 1/3 日支費)
+
+    // 5. 其他實支實付項目
+    telecomCost: 0,        // 電信費
+    businessMealCost: 0,   // 交際餐費 (實支)
+    drinksCost: 0,         // 飲品
+    giftCost: 0,           // 禮品
+    miscCost: 0,           // 其他雜費
+  });
+
+  const [result, setResult] = useState({
+    transportTotal: 0,
+    lodgingTotal: 0,
+    perDiemTotal: 0,
+    perDiemDeduction: 0, // 扣除額
+    otherTotal: 0,       // 電信+交際+飲品+禮品+雜支
+    grandTotal: 0,
+    lodgingOverBudget: 0,
+    carSubsidy: 0,
+    motoSubsidy: 0,
+    lodgingLimitTotal: 0
+  });
+
+  // 自動計算天數
+  useEffect(() => {
+    if (formData.startDate && formData.endDate) {
+      const start = new Date(formData.startDate);
+      const end = new Date(formData.endDate);
+      const diffTime = Math.abs(end - start);
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1; // 含頭尾
+      if (!isNaN(diffDays) && diffDays > 0) {
+        setFormData(prev => ({ ...prev, days: diffDays, nights: diffDays - 1 }));
+      }
+    }
+  }, [formData.startDate, formData.endDate]);
+
+  useEffect(() => {
+    calculateExpenses();
+  }, [formData, activeTab]);
+
+  const handleInputChange = (e) => {
+    const { name, value } = e.target;
+    // 處理數字與字串
+    const isNum = ['days', 'nights', 'publicTransport', 'carKm', 'motoKm', 'fuelPrice', 'lodgingCost', 'breakfastCount', 'lunchDinnerCount', 'businessMealDays', 'telecomCost', 'businessMealCost', 'drinksCost', 'giftCost', 'miscCost'].includes(name);
+    
+    setFormData(prev => ({
+      ...prev,
+      [name]: isNum ? (parseFloat(value) || (value === '' ? '' : 0)) : value
+    }));
+  };
+
+  const calculateExpenses = () => {
+    let transportTotal = 0;
+    let lodgingTotal = 0;
+    let perDiemTotal = 0;
+    let perDiemDeduction = 0;
+    let otherTotal = 0;
+    let lodgingOverBudget = 0;
+    let lodgingLimitTotal = 0;
+
+    // 1. 交通費
+    const carSubsidy = (formData.carKm > 0) 
+      ? ((formData.carKm / 8) * formData.fuelPrice) + (formData.carKm * 2) 
+      : 0;
+    const motoSubsidy = (formData.motoKm > 0) 
+      ? ((formData.motoKm / 20) * formData.fuelPrice) + (formData.motoKm * 1) 
+      : 0;
+
+    transportTotal = (Number(formData.publicTransport) || 0) + Math.round(carSubsidy) + Math.round(motoSubsidy);
+
+    // 2. 住宿費
+    const actualLodging = Number(formData.lodgingCost) || 0;
+    if (activeTab === 'domestic') {
+      const limitPerNight = DOMESTIC_RATES[formData.rank].lodgingLimit;
+      lodgingLimitTotal = limitPerNight * formData.nights;
+      if (actualLodging > lodgingLimitTotal && formData.rank !== 'exec') {
+        lodgingOverBudget = actualLodging - lodgingLimitTotal;
+        lodgingTotal = actualLodging; 
+      } else {
+        lodgingTotal = actualLodging;
+      }
+    } else {
+      lodgingTotal = actualLodging;
+      lodgingLimitTotal = 0; 
+    }
+
+    // 3. 膳雜費 (重點邏輯：扣除 1/3)
+    if (activeTab === 'domestic') {
+      const rates = DOMESTIC_RATES[formData.rank];
+      perDiemTotal = (formData.breakfastCount * rates.breakfast) + (formData.lunchDinnerCount * rates.meal);
+      // 國內若有交際餐費，通常直接不申報該餐的膳費，故不在此處自動扣 1/3，而是依靠使用者減少「餐數」
+    } else {
+      const dailyRate = FOREIGN_RATES[formData.zone][formData.rank];
+      const baseTotal = formData.days * dailyRate;
+      
+      // 國外：計算扣除額 (交際日數 * 日支費 * 1/3)
+      if (formData.businessMealDays > 0) {
+        perDiemDeduction = Math.round(formData.businessMealDays * dailyRate * (1/3));
+      }
+      perDiemTotal = baseTotal - perDiemDeduction;
+    }
+
+    // 4. 其他實支項目
+    otherTotal = (Number(formData.telecomCost) || 0) + 
+                 (Number(formData.businessMealCost) || 0) + 
+                 (Number(formData.drinksCost) || 0) + 
+                 (Number(formData.giftCost) || 0) + 
+                 (Number(formData.miscCost) || 0);
+
+    setResult({
+      transportTotal: Math.round(transportTotal),
+      lodgingTotal: Math.round(lodgingTotal),
+      perDiemTotal: Math.round(perDiemTotal),
+      perDiemDeduction: Math.round(perDiemDeduction),
+      otherTotal: Math.round(otherTotal),
+      grandTotal: Math.round(transportTotal + lodgingTotal + perDiemTotal + otherTotal),
+      carSubsidy: Math.round(carSubsidy),
+      motoSubsidy: Math.round(motoSubsidy),
+      lodgingLimitTotal: lodgingLimitTotal,
+      lodgingOverBudget: Math.round(lodgingOverBudget)
+    });
+  };
+
+  const Cell = ({ children, className = "", header = false, align = "left", bg = "bg-white", colSpan = 1 }) => {
+    const baseClass = "border border-gray-300 px-2 py-1 text-sm h-8 flex items-center";
+    const headerClass = header ? "bg-gray-100 font-bold text-center justify-center text-gray-700" : bg;
+    const alignClass = align === "right" ? "justify-end" : align === "center" ? "justify-center" : "justify-start";
+    
+    // colSpan simulation using flex-grow/basis is tricky in flexbox grid, 
+    // so we assume the parent controls the width via flex basis classes.
+    return (
+      <div className={`${baseClass} ${headerClass} ${alignClass} ${className}`}>
+        {children}
+      </div>
+    );
+  };
+
+  const InputCell = ({ name, value, type = "number", onChange, placeholder = "", className = "" }) => (
+    <input
+      type={type}
+      name={name}
+      value={value}
+      onChange={onChange}
+      placeholder={placeholder}
+      className={`w-full h-full bg-transparent outline-none focus:bg-blue-50 focus:ring-2 focus:ring-emerald-500 px-1 text-right font-mono ${className}`}
+      onFocus={(e) => e.target.select()}
+    />
+  );
+
+  return (
+    <div className="flex flex-col h-screen bg-gray-100 font-sans text-gray-800 overflow-hidden">
+      
+      {/* 1. Top Ribbon */}
+      <div className="bg-emerald-700 text-white flex flex-col shadow-sm flex-shrink-0">
+        <div className="flex items-center justify-between px-4 py-1.5 border-b border-emerald-600">
+          <div className="flex items-center space-x-3">
+            <div className="bg-white p-1 rounded-sm">
+              <Table className="w-4 h-4 text-emerald-700" />
+            </div>
+            <span className="text-sm font-medium">差旅費用報銷單.xlsx</span>
+          </div>
+          <div className="flex space-x-2">
+             <button className="p-1 hover:bg-emerald-600 rounded"><User className="w-4 h-4" /></button>
+          </div>
+        </div>
+        <div className="bg-gray-50 text-gray-700 px-4 py-2 flex items-center space-x-6 border-b border-gray-300 shadow-inner">
+          <div className="flex flex-col items-center group cursor-pointer" onClick={() => window.print()}>
+            <Printer className="w-6 h-6 text-gray-600 mb-1 group-hover:text-emerald-600" />
+            <span className="text-[10px]">列印報表</span>
+          </div>
+          <div className="w-px h-8 bg-gray-300"></div>
+          <div className="flex flex-col items-center group cursor-pointer">
+            <Save className="w-6 h-6 text-gray-600 mb-1 group-hover:text-emerald-600" />
+            <span className="text-[10px]">儲存檔案</span>
+          </div>
+        </div>
+      </div>
+
+      {/* 2. Main Sheet Area */}
+      <div className="flex-1 overflow-auto bg-gray-200 p-4 flex justify-center">
+        <div className="bg-white shadow-lg w-full max-w-5xl border-r-4 border-b-4 border-gray-300/50">
+          
+          {/* Header Letters */}
+          <div className="flex border-b border-gray-300 bg-gray-100">
+             <div className="w-10 border-r border-gray-300 flex-shrink-0 bg-gray-100"></div>
+             <Cell header className="flex-[2]">A <span className="font-normal text-xs ml-1">(項目)</span></Cell>
+             <Cell header className="flex-[3]">B <span className="font-normal text-xs ml-1">(內容/輸入)</span></Cell>
+             <Cell header className="flex-[2]">C <span className="font-normal text-xs ml-1">(單價/費率)</span></Cell>
+             <Cell header className="flex-[2]">D <span className="font-normal text-xs ml-1">(金額試算)</span></Cell>
+             <Cell header className="flex-[3]">E <span className="font-normal text-xs ml-1">(備註)</span></Cell>
+          </div>
+
+          {/* Rows */}
+          
+          {/* Row 1: Title */}
+          <div className="flex">
+            <div className="w-10 border-r border-gray-300 bg-gray-100 text-xs text-center flex items-center justify-center font-bold">1</div>
+            <Cell className="flex-[12] font-bold text-lg text-emerald-800 text-center" bg={activeTab === 'domestic' ? "bg-emerald-50" : "bg-indigo-50"} align="center">
+              {activeTab === 'domestic' ? '國內' : '國外'}出差旅費報支單
+            </Cell>
+          </div>
+
+          {/* --- Section 1: 基本資料 (人、事、時、地) --- */}
+          
+          {/* Row 2: Name & Rank */}
+          <div className="flex">
+            <div className="w-10 border-r border-gray-300 bg-gray-100 text-xs text-center flex items-center justify-center font-bold">2</div>
+            <Cell className="flex-[2] font-semibold bg-gray-50">姓名 / 職別</Cell>
+            <Cell className="flex-[3] flex space-x-2">
+              <input 
+                className="w-1/2 border-b border-gray-300 outline-none px-1" 
+                name="name" 
+                value={formData.name} 
+                onChange={handleInputChange} 
+                placeholder="輸入姓名" 
+              />
+              <select 
+                name="rank" 
+                value={formData.rank} 
+                onChange={handleInputChange}
+                className="w-1/2 border-b border-gray-300 outline-none bg-transparent"
+              >
+                {RANKS.map(rank => (
+                  <option key={rank.id} value={rank.id}>{rank.name}</option>
+                ))}
+              </select>
+            </Cell>
+            <Cell className="flex-[2] text-gray-400 text-xs text-center">-</Cell>
+            <Cell className="flex-[2] text-gray-400 text-center">-</Cell>
+            <Cell className="flex-[3] text-xs text-gray-500">請確認職級以對應津貼</Cell>
+          </div>
+
+          {/* Row 3: Location & Time */}
+          <div className="flex">
+            <div className="w-10 border-r border-gray-300 bg-gray-100 text-xs text-center flex items-center justify-center font-bold">3</div>
+            <Cell className="flex-[2] font-semibold bg-gray-50">地點 / 時間</Cell>
+            <Cell className="flex-[3] flex flex-col justify-center space-y-1 py-1 h-auto">
+              {activeTab === 'foreign' && (
+                <select 
+                  name="zone" 
+                  value={formData.zone} 
+                  onChange={handleInputChange}
+                  className="w-full border border-gray-200 text-sm mb-1"
+                >
+                  {FOREIGN_ZONES.map(zone => (
+                    <option key={zone.id} value={zone.id}>{zone.name}</option>
+                  ))}
+                </select>
+              )}
+              <div className="flex items-center space-x-1">
+                <input type="date" name="startDate" value={formData.startDate} onChange={handleInputChange} className="w-1/2 text-xs border border-gray-200" />
+                <span className="text-xs">至</span>
+                <input type="date" name="endDate" value={formData.endDate} onChange={handleInputChange} className="w-1/2 text-xs border border-gray-200" />
+              </div>
+            </Cell>
+            <Cell className="flex-[2] text-center text-xs">
+              共 <span className="font-bold text-emerald-600 text-base mx-1">{formData.days}</span> 天
+            </Cell>
+            <Cell className="flex-[2] text-center text-xs">
+              <span className="font-bold text-emerald-600 text-base mx-1">{formData.nights}</span> 晚
+            </Cell>
+            <Cell className="flex-[3] text-xs text-gray-500">
+               {activeTab === 'foreign' ? FOREIGN_ZONES.find(z => z.id === formData.zone)?.desc : '系統自動計算天數'}
+            </Cell>
+          </div>
+
+          {/* Spacer Row */}
+          <div className="flex bg-gray-200 h-1"><div className="w-10 bg-gray-200"></div></div>
+
+          {/* --- Section 2: 費用明細 --- */}
+
+          {/* Row 4: Category Header */}
+          <div className="flex">
+            <div className="w-10 border-r border-gray-300 bg-gray-100 text-xs text-center flex items-center justify-center font-bold">4</div>
+            <Cell header className="flex-[2] bg-gray-200 text-gray-800">費用類別</Cell>
+            <Cell header className="flex-[3] bg-gray-200 text-gray-800">輸入內容</Cell>
+            <Cell header className="flex-[2] bg-gray-200 text-gray-800">單價/標準</Cell>
+            <Cell header className="flex-[2] bg-gray-200 text-gray-800">小計</Cell>
+            <Cell header className="flex-[3] bg-gray-200 text-gray-800">說明</Cell>
+          </div>
+
+          {/* Row 5: Transport */}
+          <div className="flex group">
+            <div className="w-10 border-r border-gray-300 bg-gray-100 text-xs text-center flex items-center justify-center font-bold group-hover:bg-blue-50">5</div>
+            <Cell className="flex-[2]">交通費 (大眾/機票)</Cell>
+            <Cell className="flex-[3]">
+               <InputCell name="publicTransport" value={formData.publicTransport} onChange={handleInputChange} placeholder="總金額" />
+            </Cell>
+            <Cell className="flex-[2] text-center text-gray-400">-</Cell>
+            <Cell className="flex-[2] font-mono text-right font-bold">{formData.publicTransport || 0}</Cell>
+            <Cell className="flex-[3] text-xs text-gray-500">實報實銷</Cell>
+          </div>
+
+          {/* Row 6: Private Car (Domestic Only) or Local Transport (Foreign) */}
+          {activeTab === 'domestic' ? (
+            <div className="flex group">
+              <div className="w-10 border-r border-gray-300 bg-gray-100 text-xs text-center flex items-center justify-center font-bold group-hover:bg-blue-50">6</div>
+              <Cell className="flex-[2]">交通費 (私車公用)</Cell>
+              <Cell className="flex-[3] flex space-x-2">
+                 <div className="w-1/2 relative">
+                   <InputCell name="carKm" value={formData.carKm} onChange={handleInputChange} placeholder="汽車Km" />
+                   <span className="absolute right-0 top-0 text-[10px] text-gray-400 p-1">汽</span>
+                 </div>
+                 <div className="w-1/2 relative">
+                   <InputCell name="motoKm" value={formData.motoKm} onChange={handleInputChange} placeholder="機車Km" />
+                   <span className="absolute right-0 top-0 text-[10px] text-gray-400 p-1">機</span>
+                 </div>
+              </Cell>
+              <Cell className="flex-[2] text-xs text-center text-gray-500">油價: ${formData.fuelPrice}</Cell>
+              <Cell className="flex-[2] font-mono text-right font-bold">{result.carSubsidy + result.motoSubsidy}</Cell>
+              <Cell className="flex-[3] text-xs text-gray-500">含油資與保養費</Cell>
+            </div>
+          ) : (
+             <div className="flex group">
+              <div className="w-10 border-r border-gray-300 bg-gray-100 text-xs text-center flex items-center justify-center font-bold group-hover:bg-blue-50">6</div>
+              <Cell className="flex-[2] text-gray-400">交通費 (其他)</Cell>
+              <Cell className="flex-[3] bg-gray-50 text-center">-</Cell>
+              <Cell className="flex-[2] bg-gray-50 text-center">-</Cell>
+              <Cell className="flex-[2] bg-gray-50 text-center">-</Cell>
+              <Cell className="flex-[3] bg-gray-50"></Cell>
+            </div>
+          )}
+
+          {/* Row 7: Lodging */}
+          <div className="flex group">
+            <div className="w-10 border-r border-gray-300 bg-gray-100 text-xs text-center flex items-center justify-center font-bold group-hover:bg-blue-50">7</div>
+            <Cell className="flex-[2]">住宿費</Cell>
+            <Cell className="flex-[3]">
+               <InputCell name="lodgingCost" value={formData.lodgingCost} onChange={handleInputChange} placeholder="總金額" />
+            </Cell>
+            <Cell className="flex-[2] text-xs text-center text-red-500">
+              {activeTab === 'domestic' ? `上限: ${result.lodgingLimitTotal}` : '實報實銷'}
+            </Cell>
+            <Cell className="flex-[2] font-mono text-right font-bold">{result.lodgingTotal}</Cell>
+            <Cell className="flex-[3] text-xs text-gray-500">
+               {result.lodgingOverBudget > 0 ? `已超支 ${result.lodgingOverBudget} (需簽核)` : ''}
+            </Cell>
+          </div>
+
+          {/* Row 8: Meal Allowance / Per Diem */}
+          <div className="flex group">
+            <div className="w-10 border-r border-gray-300 bg-gray-100 text-xs text-center flex items-center justify-center font-bold group-hover:bg-blue-50">8</div>
+            <Cell className="flex-[2]">膳費 (津貼/日支)</Cell>
+            <Cell className="flex-[3]">
+               {activeTab === 'domestic' ? (
+                 <div className="flex space-x-1 text-xs items-center h-full">
+                   <span className="text-gray-500">早:</span>
+                   <input name="breakfastCount" value={formData.breakfastCount} onChange={handleInputChange} className="w-8 border-b text-center outline-none"/>
+                   <span className="text-gray-500">午晚:</span>
+                   <input name="lunchDinnerCount" value={formData.lunchDinnerCount} onChange={handleInputChange} className="w-8 border-b text-center outline-none"/>
+                   <span className="text-gray-500">餐</span>
+                 </div>
+               ) : (
+                 <div className="text-center text-sm">{formData.days} 天</div>
+               )}
+            </Cell>
+            <Cell className="flex-[2] text-xs text-center text-gray-500">
+               {activeTab === 'domestic' ? '依餐定額' : `$${FOREIGN_RATES[formData.zone][formData.rank]}/天`}
+            </Cell>
+            <Cell className="flex-[2] font-mono text-right font-bold text-blue-600">
+              {activeTab === 'domestic' ? result.perDiemTotal : (formData.days * FOREIGN_RATES[formData.zone][formData.rank])}
+            </Cell>
+            <Cell className="flex-[3] text-xs text-gray-500">
+              {activeTab === 'domestic' ? '未用餐請填0' : '依天數計算'}
+            </Cell>
+          </div>
+
+          {/* Row 9: 膳費扣除邏輯 (交際餐費扣抵) - 僅國外顯示扣除，國內顯示為文字說明 */}
+          <div className="flex group">
+            <div className="w-10 border-r border-gray-300 bg-gray-100 text-xs text-center flex items-center justify-center font-bold group-hover:bg-red-50">9</div>
+            <Cell className="flex-[2] text-red-700">膳費扣抵 (交際)</Cell>
+            <Cell className="flex-[3]">
+              {activeTab === 'foreign' ? (
+                <div className="flex items-center">
+                  <span className="text-xs mr-2">有交際餐費天數:</span>
+                  <input 
+                    name="businessMealDays" 
+                    value={formData.businessMealDays} 
+                    onChange={handleInputChange} 
+                    className="w-12 border-b border-red-300 text-center outline-none text-red-700 font-bold"
+                  />
+                  <span className="text-xs ml-1">天</span>
+                </div>
+              ) : (
+                <span className="text-xs text-gray-400">國內請直接減少上方餐數</span>
+              )}
+            </Cell>
+            <Cell className="flex-[2] text-xs text-center text-red-400">
+               {activeTab === 'foreign' ? '-33.3%' : '-'}
+            </Cell>
+            <Cell className="flex-[2] font-mono text-right font-bold text-red-600">
+               {activeTab === 'foreign' ? `-${result.perDiemDeduction}` : '-'}
+            </Cell>
+            <Cell className="flex-[3] text-xs text-red-500">
+              {activeTab === 'foreign' ? '當日有報交際費需扣除1/3' : ''}
+            </Cell>
+          </div>
+
+          {/* Spacer Row */}
+          <div className="flex bg-gray-200 h-1"><div className="w-10 bg-gray-200"></div></div>
+
+          {/* --- Section 3: 其他實支實付 --- */}
+
+          {/* Row 10: Telecom */}
+          <div className="flex group">
+            <div className="w-10 border-r border-gray-300 bg-gray-100 text-xs text-center flex items-center justify-center font-bold group-hover:bg-orange-50">10</div>
+            <Cell className="flex-[2]">電信費</Cell>
+            <Cell className="flex-[3]">
+               <InputCell name="telecomCost" value={formData.telecomCost} onChange={handleInputChange} />
+            </Cell>
+            <Cell className="flex-[2] text-center text-gray-400">-</Cell>
+            <Cell className="flex-[2] font-mono text-right font-bold">{formData.telecomCost || 0}</Cell>
+            <Cell className="flex-[3] text-xs text-gray-500">公務手機/漫遊</Cell>
+          </div>
+
+          {/* Row 11: Business Meal Cost (Entertainment) */}
+          <div className="flex group">
+            <div className="w-10 border-r border-gray-300 bg-gray-100 text-xs text-center flex items-center justify-center font-bold group-hover:bg-orange-50">11</div>
+            <Cell className="flex-[2]">餐費 (交際應酬)</Cell>
+            <Cell className="flex-[3]">
+               <InputCell name="businessMealCost" value={formData.businessMealCost} onChange={handleInputChange} />
+            </Cell>
+            <Cell className="flex-[2] text-center text-gray-400">-</Cell>
+            <Cell className="flex-[2] font-mono text-right font-bold">{formData.businessMealCost || 0}</Cell>
+            <Cell className="flex-[3] text-xs text-gray-500">招待客戶用，需附名單</Cell>
+          </div>
+
+          {/* Row 12: Drinks */}
+          <div className="flex group">
+            <div className="w-10 border-r border-gray-300 bg-gray-100 text-xs text-center flex items-center justify-center font-bold group-hover:bg-orange-50">12</div>
+            <Cell className="flex-[2]">飲品</Cell>
+            <Cell className="flex-[3]">
+               <InputCell name="drinksCost" value={formData.drinksCost} onChange={handleInputChange} />
+            </Cell>
+            <Cell className="flex-[2] text-center text-gray-400">-</Cell>
+            <Cell className="flex-[2] font-mono text-right font-bold">{formData.drinksCost || 0}</Cell>
+            <Cell className="flex-[3] text-xs text-gray-500">會議/客戶接待</Cell>
+          </div>
+
+          {/* Row 13: Gifts */}
+          <div className="flex group">
+            <div className="w-10 border-r border-gray-300 bg-gray-100 text-xs text-center flex items-center justify-center font-bold group-hover:bg-orange-50">13</div>
+            <Cell className="flex-[2]">禮品</Cell>
+            <Cell className="flex-[3]">
+               <InputCell name="giftCost" value={formData.giftCost} onChange={handleInputChange} />
+            </Cell>
+            <Cell className="flex-[2] text-center text-gray-400">-</Cell>
+            <Cell className="flex-[2] font-mono text-right font-bold">{formData.giftCost || 0}</Cell>
+            <Cell className="flex-[3] text-xs text-gray-500">客戶餽贈</Cell>
+          </div>
+
+          {/* Row 14: Misc (Parking etc) */}
+          <div className="flex group">
+            <div className="w-10 border-r border-gray-300 bg-gray-100 text-xs text-center flex items-center justify-center font-bold group-hover:bg-orange-50">14</div>
+            <Cell className="flex-[2]">其他雜費</Cell>
+            <Cell className="flex-[3]">
+               <InputCell name="miscCost" value={formData.miscCost} onChange={handleInputChange} placeholder="如:停車費、過路費" />
+            </Cell>
+            <Cell className="flex-[2] text-center text-gray-400">-</Cell>
+            <Cell className="flex-[2] font-mono text-right font-bold">{formData.miscCost || 0}</Cell>
+            <Cell className="flex-[3] text-xs text-gray-500">需檢附單據</Cell>
+          </div>
+
+
+          {/* Row 15: Total */}
+          <div className="flex border-t-4 border-double border-emerald-600 mt-1">
+            <div className="w-10 border-r border-gray-300 bg-gray-100 text-xs text-center flex items-center justify-center font-bold">15</div>
+            <Cell className="flex-[7] text-right font-bold text-gray-800 bg-gray-100 text-lg" align="right">本次出差費用總計 (TWD):</Cell>
+            <Cell className="flex-[2] font-mono text-2xl font-bold text-emerald-700 bg-yellow-50" align="right">
+               {result.grandTotal.toLocaleString()}
+            </Cell>
+            <Cell className="flex-[3] bg-gray-100"></Cell>
+          </div>
+
+        </div>
+      </div>
+
+      {/* 4. Bottom Sheet Tabs */}
+      <div className="bg-gray-200 border-t border-gray-300 flex items-center px-2 h-10 space-x-1 flex-shrink-0">
+        <div className="flex space-x-2 mr-4 text-gray-500">
+          <ChevronDown className="w-4 h-4 rotate-90" />
+          <ChevronDown className="w-4 h-4 -rotate-90" />
+        </div>
+        <button
+          onClick={() => setActiveTab('domestic')}
+          className={`px-4 py-1 text-sm font-medium rounded-t-lg border-t border-l border-r border-gray-300 relative -mb-1 z-10 
+            ${activeTab === 'domestic' ? 'bg-white text-emerald-700 shadow-sm' : 'bg-gray-200 text-gray-500 hover:bg-gray-300'}`}
+        >
+          Sheet1 - 國內出差
+        </button>
+        <button
+          onClick={() => setActiveTab('foreign')}
+          className={`px-4 py-1 text-sm font-medium rounded-t-lg border-t border-l border-r border-gray-300 relative -mb-1 z-10
+            ${activeTab === 'foreign' ? 'bg-white text-indigo-700 shadow-sm' : 'bg-gray-200 text-gray-500 hover:bg-gray-300'}`}
+        >
+          Sheet2 - 國外差旅
+        </button>
+      </div>
+
+      {/* Status Bar */}
+      <div className="bg-emerald-700 text-white text-xs py-1 px-4 flex justify-between flex-shrink-0">
+        <div>就緒</div>
+        <div className="flex space-x-4">
+           <span>項目: 15</span>
+           <span>總計: {result.grandTotal}</span>
+        </div>
+      </div>
+
+    </div>
+  );
+}
